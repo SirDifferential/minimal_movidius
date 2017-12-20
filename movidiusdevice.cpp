@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <algorithm>
 #include <assert.h>
+#include <sstream>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,16 +23,16 @@ void printMovidiusError(int rc)
     case MVNC_DEVICE_NOT_FOUND: fprintf(stderr, "MVNC_DEVICE_NOT_FOUND\n"); break;
     case MVNC_INVALID_PARAMETERS: fprintf(stderr, "MVNC_INVALID_PARAMETERS\n"); break;
     case MVNC_TIMEOUT: fprintf(stderr, "MVNC_TIMEOUT\n"); break;
-    case MVNC_MVCMDNOTFOUND: fprintf(stderr, "MVNC_MVCMDNOTFOUND\n"); break;
-    case MVNC_NODATA: fprintf(stderr, "MVNC_NODATA\n"); break;
+    case MVNC_MVCMD_NOT_FOUND: fprintf(stderr, "MVNC_MVCMDNOTFOUND\n"); break;
+    case MVNC_NO_DATA: fprintf(stderr, "MVNC_NODATA\n"); break;
     case MVNC_GONE: fprintf(stderr, "MVNC_GONE\n"); break;
-    case MVNC_UNSUPPORTEDGRAPHFILE: fprintf(stderr, "MVNC_UNSUPPORTEDGRAPHFILE\n"); break;
-    case MVNC_MYRIADERROR: fprintf(stderr, "MVNC_MYRIADERROR\n"); break;
+    case MVNC_UNSUPPORTED_GRAPH_FILE: fprintf(stderr, "MVNC_UNSUPPORTEDGRAPHFILE\n"); break;
+    case MVNC_MYRIAD_ERROR: fprintf(stderr, "MVNC_MYRIADERROR\n"); break;
     default: fprintf(stderr, "Unknown error code %d\n", rc); break;
     }
 }
 
-void movidius_convertImage(RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev)
+void movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev)
 {
     if (color_width != dev->reqsize || color_height != dev->reqsize)
     {
@@ -44,21 +45,21 @@ void movidius_convertImage(RGB* colorimage, unsigned int color_width, unsigned i
         if (dev->movidius_image != NULL)
             free(dev->movidius_image);
         dev->movidius_image = (movidius_RGB_f16*)malloc(sizeof(movidius_RGB_f16) * dev->reqsize * dev->reqsize);
-        memset(dev->movidius_image, 0, sizeof(uint16_t) * dev->reqsize * dev->reqsize * 3);
+        memset(dev->movidius_image, 0, sizeof(movidius_RGB_f16) * dev->reqsize * dev->reqsize);
 
         if (dev->scaled_image != NULL)
             free(dev->scaled_image);
 
         dev->scaled_image = (float*)malloc(sizeof(float) * dev->reqsize * dev->reqsize * 3);
         memset(dev->scaled_image, 0, sizeof(float) * dev->reqsize * dev->reqsize * 3);
+        dev->currentImageSize = dev->reqsize;
     }
 
-    RGB temp;
-    for (int y = 0; y < dev->reqsize; y++)
+    for (unsigned int y = 0; y < dev->reqsize; y++)
     {
-        for (int x = 0; x < dev->reqsize; x++)
+        for (unsigned int x = 0; x < dev->reqsize; x++)
         {
-            temp = colorimage[y * color_width + x];
+            const movidius_RGB& temp = colorimage[y * color_width + x];
             dev->scaled_image[3 * (y * dev->reqsize + x) + 0] = (((float)temp.r) - dev->mean[0]) * dev->standard_deviation[0];
             dev->scaled_image[3 * (y * dev->reqsize + x) + 1] = (((float)temp.g) - dev->mean[1]) * dev->standard_deviation[1];
             dev->scaled_image[3 * (y * dev->reqsize + x) + 2] = (((float)temp.b) - dev->mean[2]) * dev->standard_deviation[2];
@@ -68,37 +69,42 @@ void movidius_convertImage(RGB* colorimage, unsigned int color_width, unsigned i
     floattofp16((unsigned char*)dev->movidius_image, dev->scaled_image, 3*dev->reqsize*dev->reqsize);
 }
 
-int movidius_runInference(movidius_device* dev)
+int movidius_runInference(movidius_device* dev, float* results)
 {
-    for (int c = 0; c < dev->inferenceCount; c++)
+    for (unsigned int c = 0; c < dev->inferenceCount; c++)
     {
-        int i, throttling;
-        void* result;
-        unsigned int resultlen;
-        void* userParam;
-        float* cmpdata;
-        float* timetaken;
-        unsigned int timetakenlen, throttlinglen;
-        float* resultfp32;
-        int* indexes;
+        unsigned int i = 0;
+        unsigned int throttling = 0;
+        float* timetaken = NULL;
+        unsigned int timetakenlen = 0;
+        unsigned int throttlinglen = 0;
 
-        int rc = mvncLoadTensor(dev->currentGraphHandle, dev->movidius_image, 3 * dev->reqsize * dev->reqsize * sizeof(*dev->movidius_image), 0);
+        int rc = mvncLoadTensor(dev->currentGraphHandle, dev->movidius_image,
+            dev->reqsize * dev->reqsize * sizeof(movidius_RGB_f16), NULL);
+
         if (rc != MVNC_OK)
-        {
-            fprintf(stderr, "movidius: LoadTensor failed: %d\n", rc);
+        {   
+            fprintf(stderr, "movidius: LoadTensor failed: %d. Image dims: "
+                    "%d x %d, bytes: %d\n", rc, dev->reqsize, dev->reqsize,
+                    dev->reqsize * dev->reqsize * (int)sizeof(movidius_RGB_f16));
+
             printMovidiusError(rc);
             return MOVIDIUS_LOADTENSOR_ERROR;
         }
 
-        rc = mvncGetResult(dev->currentGraphHandle, &result, &resultlen, &userParam);
+        void* resultData16;
+        void* userParam;
+        unsigned int lenResultData;
+        rc = mvncGetResult(dev->currentGraphHandle, &resultData16, &lenResultData, &userParam);
+
         if (rc != MVNC_OK)
         {
-            if (rc == MVNC_MYRIADERROR)
+            if (rc == MVNC_MYRIAD_ERROR)
             {
                 char* debuginfo;
                 unsigned debuginfolen;
 
-                rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_DEBUGINFO, (void**)&debuginfo, &debuginfolen);
+                rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_DEBUG_INFO, (void**)&debuginfo, &debuginfolen);
                 if (rc == MVNC_OK)
                 {
                     fprintf(stderr, "movidius: GetResult failed, myriad error: %s\n", debuginfo);
@@ -111,28 +117,20 @@ int movidius_runInference(movidius_device* dev)
             return 1;
         }
 
-        resultlen /= sizeof(unsigned short);
-        resultfp32 = (float*)malloc(resultlen * sizeof(*resultfp32));
-        fp16tofloat(resultfp32, (unsigned char*)result, resultlen);
+        // convert half precision floats to full floats
+        int numResults = lenResultData / sizeof(uint16_t);
+        float* resultData32;
+        resultData32 = (float*)malloc(numResults * sizeof(*resultData32));
+        fp16tofloat(resultData32, (unsigned char*)resultData16, numResults);
 
-        indexes = (int*)malloc(sizeof(*indexes) * resultlen);
-        for(i = 0; i < (int)resultlen; i++)
-            indexes[i] = i;
-        cmpdata = resultfp32;
-
-        movidius_sortInference(indexes, indexes + resultlen, cmpdata);
-
-        for(i = 0; i < 5 && i < resultlen; i++)
+        for (int index = 0; index < numResults; index++)
         {
-            fprintf(stderr, "movidius: %s (%.2f%%) ", dev->categories[indexes[i]], resultfp32[indexes[i]] * 100.0);
+            results[index] = resultData32[index];
         }
+        free(resultData32);
 
-        fprintf(stderr, "\n");
-        free(resultfp32);
-        free(indexes);
-
-        rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_TIMETAKEN, (void **)&timetaken, &timetakenlen);
-        if(rc)
+        rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_TIME_TAKEN, (void **)&timetaken, &timetakenlen);
+        if (rc)
         {
             fprintf(stderr, "movidius: GetGraphOption failed for getting MVNC_TIMETAKEN, rc=%d\n", rc);
             printMovidiusError(rc);
@@ -141,10 +139,11 @@ int movidius_runInference(movidius_device* dev)
 
         timetakenlen = timetakenlen / sizeof(*timetaken);
         float sum = 0;
-        for(i = 0; i < timetakenlen; i++)
+        for (i = 0; i < timetakenlen; i++)
             sum += timetaken[i];
 
-        fprintf(stderr, "movidius: Inference time: %f ms\n", sum);
+        if (sum > 100)
+            fprintf(stderr, "movidius: Inference time was long: %f ms\n", sum);
 
         rc = mvncGetDeviceOption(dev->dev_handle, MVNC_THERMAL_THROTTLING_LEVEL, (void **)&throttling, &throttlinglen);
         if (rc)
@@ -264,9 +263,11 @@ int movidius_loadCategories(const char* path, movidius_device* dev)
 
     dev->numCategories = 0;
     dev->categories = (char**)malloc(1000 * sizeof(*dev->categories));
+    std::stringstream ss;
 
     while (fgets(line, sizeof(line), fp))
     {
+        ss << line;
         p = strchr(line, '\n');
         if (p)
             *p = 0;
@@ -277,6 +278,14 @@ int movidius_loadCategories(const char* path, movidius_device* dev)
             if (dev->numCategories == 1000)
                 break;
         }
+    }
+
+    if (dev->numCategories == 0)
+    {
+        fprintf(stderr, "movidius: device numCategories is 0 after loading categories\n");
+        fprintf(stderr, "Full contents of categories file: %s\n", ss.str().c_str());
+        fprintf(stderr, "File was: %s", path);
+        return 1;
     }
 
     fclose(fp);
@@ -336,7 +345,7 @@ int movidius_uploadNetwork(movidius_device* dev)
 
         if (rc != MVNC_OK)
         {
-            fprintf(stderr, "movidius: AllocateGraph failed, rc = %d\n", rc);
+            fprintf(stderr, "movidius: AllocateGraph failed, rc = %d for network %s\n", rc, dev->networkPath);
             printMovidiusError(rc);
             free(dev->graphFileContents);
             for (i = 0; i < dev->numCategories; i++)
@@ -377,6 +386,10 @@ int movidius_deallocateGraph(movidius_device* dev)
             free(dev->categories[i]);
         free(dev->categories);
     }
+    else
+    {
+        fprintf(stderr, "movidiusdevice: Warning: Deallocating graph when numCategories == 0\n");
+    }
 
     dev->categories = NULL;
     dev->numCategories = 0;
@@ -384,8 +397,6 @@ int movidius_deallocateGraph(movidius_device* dev)
         free(dev->graphFileContents);
     dev->graphFileContents = NULL;
 
-    // Apparently this function may not be implemented in all versions?
-    // If so, how do we free memory?
     int rc = mvncDeallocateGraph(dev->currentGraphHandle);
 
     if (rc != MVNC_OK)
@@ -401,19 +412,20 @@ int movidius_deallocateGraph(movidius_device* dev)
     }
 
     dev->currentGraphHandle = NULL;
+    fprintf(stderr, "movidius: graph deallocated\n");
 
     return 0;
 }
 
 int movidius_openDevice(movidius_device* dev)
 {
-    assert(sizeof(dev->dev_name) >= MVNC_MAXNAMESIZE);
+    assert(sizeof(dev->dev_name) >= MVNC_MAX_NAME_SIZE);
 
-    char name[MVNC_MAXNAMESIZE];
+    char name[MVNC_MAX_NAME_SIZE];
     int loglevel = 2;
     void* h = NULL;
 
-    mvncSetDeviceOption(0, MVNC_LOGLEVEL, &loglevel, sizeof(loglevel));
+    mvncSetDeviceOption(0, MVNC_LOG_LEVEL, &loglevel, sizeof(loglevel));
 
     int rc = mvncGetDeviceName(0, name, sizeof(name));
     if (rc != MVNC_OK)
@@ -438,7 +450,7 @@ int movidius_openDevice(movidius_device* dev)
     return 0;
 }
 
-int movidius_closeDevice(movidius_device* dev)
+int movidius_closeDevice(movidius_device* dev, bool dealloc_graph)
 {
     if (dev->dev_handle == NULL)
     {
@@ -456,14 +468,15 @@ int movidius_closeDevice(movidius_device* dev)
 
     dev->currentImageSize = 0;
 
-    movidius_deallocateGraph(dev);
+    if (dealloc_graph)
+        movidius_deallocateGraph(dev);
 
     int rc = mvncCloseDevice(dev->dev_handle);
     if (rc != MVNC_OK)
     {
-        fprintf(stderr, "movidius: Device close failed: %d\n", rc);
+        fprintf(stderr, "movidius: Device close failed: %d, dealloc: %d\n", rc, dealloc_graph);
         printMovidiusError(rc);
-        return 1;
+        return 2;
     }
 
     fprintf(stderr, "movidius: Device closed\n");

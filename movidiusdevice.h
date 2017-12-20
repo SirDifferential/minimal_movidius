@@ -21,7 +21,7 @@ typedef struct
     unsigned char r;
     unsigned char g;
     unsigned char b;
-} RGB;
+} movidius_RGB;
 
 typedef struct
 {
@@ -138,9 +138,10 @@ extern int movidius_openDevice(movidius_device* dev);
 
 /**
  * Closes the device, frees all allocated buffers, etc
+ * @param dealloc_graph: If true, first tries to deallocate any graphs on the device
  * Returns 0 on success
  */
-extern int movidius_closeDevice(movidius_device* dev);
+extern int movidius_closeDevice(movidius_device* dev, bool dealloc_graph);
 
 /**
  * Uploads the caffe network at dev->networkPath onto the movidius device memory
@@ -151,9 +152,11 @@ extern int movidius_uploadNetwork(movidius_device* dev);
 /**
  * Runs the inference for the current device and it's current image
  * The image is stored in the struct by running movidius_convertImage()
+ * @param results: A list of dev->numCategories floats to be filled with results,
+ * ie: [male 7%, female 90%, other 3%]
  * Returns 0 on success
  */
-extern int movidius_runInference(movidius_device* dev);
+extern int movidius_runInference(movidius_device* dev, float* results);
 
 /**
  * Deallocates the currently used graph on the device
@@ -173,22 +176,10 @@ extern int movidius_deallocateGraph(movidius_device* dev);
  * where the mean and standard deviation are loaded from the file mean.txt that describes the
  * mean and standard deviation values of the training set that was used to generate the caffe network
  */
-extern void movidius_convertImage(RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev);
+extern void movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev);
 
 #ifdef __cplusplus
 }
 #endif
-
-// outside .cpp to avoid C linkage issues
-static void movidius_sortInference(int* start, int* end, float* cmpdata)
-{
-    std::sort(start, end, [&](const int& a, const int& b)
-        {
-            if (cmpdata[b] - cmpdata[a] <= 0)
-                return true;
-            return false;
-        }
-    );
-}
 
 #endif // MOVIDIUSDEVICE_H

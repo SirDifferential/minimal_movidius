@@ -6,7 +6,6 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
 #include "movidiusdevice.h"
 
 int main(int argc, char** argv)
@@ -60,14 +59,24 @@ int main(int argc, char** argv)
     std::chrono::high_resolution_clock::time_point t3;
     std::chrono::high_resolution_clock::time_point t4;
 
+    float* results = NULL;
+    if (&movidius_dev.numCategories == 0)
+    {
+        fprintf(stderr, "no categories after loading network\n");
+        return 1;
+    }
+
+    results = new float[movidius_dev.numCategories];
+    memset(results, 0, sizeof(float) * movidius_dev.numCategories);
+
     for (int c = 0; c < fnames.size(); c++)
     {
         t1 = std::chrono::high_resolution_clock::now();
-        movidius_convertImage((RGB*)images.at(c), req_width, req_height, &movidius_dev);
+        movidius_convertImage((movidius_RGB*)images.at(c), req_width, req_height, &movidius_dev);
 
         t2 = std::chrono::high_resolution_clock::now();
 
-        int ret = movidius_runInference(&movidius_dev);
+        int ret = movidius_runInference(&movidius_dev, results);
 
         t3 = std::chrono::high_resolution_clock::now();
 
@@ -79,13 +88,21 @@ int main(int argc, char** argv)
 
         fprintf(stderr, "convertImage(): %d us\n", dur1);
         fprintf(stderr, "runInference(): %d us\n", dur2);
+
+        for (int cat = 0; cat < movidius_dev.numCategories; cat++)
+        {
+            fprintf(stderr, "category %d (%s): %f\n", cat, movidius_dev.categories[cat], results[cat]);
+        }
     }
 
     for (int c = 0; c < images.size(); c++)
         free(images.at(c));
     images.clear();
 
-    movidius_closeDevice(&movidius_dev);
+    delete[] results;
+    results = NULL;
+
+    movidius_closeDevice(&movidius_dev, true);
 
     return 0;
 }
