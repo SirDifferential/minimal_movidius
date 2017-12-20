@@ -425,7 +425,7 @@ int movidius_openDevice(movidius_device* dev)
     int loglevel = 2;
     void* h = NULL;
 
-    mvncSetDeviceOption(0, MVNC_LOG_LEVEL, &loglevel, sizeof(loglevel));
+    mvncSetGlobalOption(MVNC_LOG_LEVEL, &loglevel, sizeof(loglevel));
 
     int rc = mvncGetDeviceName(0, name, sizeof(name));
     if (rc != MVNC_OK)
