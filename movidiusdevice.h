@@ -119,12 +119,6 @@ typedef struct
      * The resolution the currently used network expects the images to be in
      */
     unsigned int reqsize;
-
-    /**
-     * ??
-     */
-    unsigned int inferenceCount;
-
 } movidius_device;
 
 /**

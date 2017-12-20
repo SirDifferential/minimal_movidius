@@ -71,98 +71,95 @@ void movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, u
 
 int movidius_runInference(movidius_device* dev, float* results)
 {
-    for (unsigned int c = 0; c < dev->inferenceCount; c++)
+    unsigned int i = 0;
+    unsigned int throttling = 0;
+    float* timetaken = NULL;
+    unsigned int timetakenlen = 0;
+    unsigned int throttlinglen = 0;
+
+    int rc = mvncLoadTensor(dev->currentGraphHandle, dev->movidius_image,
+        dev->reqsize * dev->reqsize * sizeof(movidius_RGB_f16), NULL);
+
+    if (rc != MVNC_OK)
+    {   
+        fprintf(stderr, "movidius: LoadTensor failed: %d. Image dims: "
+                "%d x %d, bytes: %d\n", rc, dev->reqsize, dev->reqsize,
+                dev->reqsize * dev->reqsize * (int)sizeof(movidius_RGB_f16));
+
+        printMovidiusError(rc);
+        return MOVIDIUS_LOADTENSOR_ERROR;
+    }
+
+    void* resultData16;
+    void* userParam;
+    unsigned int lenResultData;
+    rc = mvncGetResult(dev->currentGraphHandle, &resultData16, &lenResultData, &userParam);
+
+    if (rc != MVNC_OK)
     {
-        unsigned int i = 0;
-        unsigned int throttling = 0;
-        float* timetaken = NULL;
-        unsigned int timetakenlen = 0;
-        unsigned int throttlinglen = 0;
-
-        int rc = mvncLoadTensor(dev->currentGraphHandle, dev->movidius_image,
-            dev->reqsize * dev->reqsize * sizeof(movidius_RGB_f16), NULL);
-
-        if (rc != MVNC_OK)
-        {   
-            fprintf(stderr, "movidius: LoadTensor failed: %d. Image dims: "
-                    "%d x %d, bytes: %d\n", rc, dev->reqsize, dev->reqsize,
-                    dev->reqsize * dev->reqsize * (int)sizeof(movidius_RGB_f16));
-
-            printMovidiusError(rc);
-            return MOVIDIUS_LOADTENSOR_ERROR;
-        }
-
-        void* resultData16;
-        void* userParam;
-        unsigned int lenResultData;
-        rc = mvncGetResult(dev->currentGraphHandle, &resultData16, &lenResultData, &userParam);
-
-        if (rc != MVNC_OK)
+        if (rc == MVNC_MYRIAD_ERROR)
         {
-            if (rc == MVNC_MYRIAD_ERROR)
+            char* debuginfo;
+            unsigned debuginfolen;
+
+            rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_DEBUG_INFO, (void**)&debuginfo, &debuginfolen);
+            if (rc == MVNC_OK)
             {
-                char* debuginfo;
-                unsigned debuginfolen;
-
-                rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_DEBUG_INFO, (void**)&debuginfo, &debuginfolen);
-                if (rc == MVNC_OK)
-                {
-                    fprintf(stderr, "movidius: GetResult failed, myriad error: %s\n", debuginfo);
-                    return 1;
-                }
+                fprintf(stderr, "movidius: GetResult failed, myriad error: %s\n", debuginfo);
+                return 1;
             }
-
-            fprintf(stderr, "movidius: GetResult failed, rc=%d\n", rc);
-            printMovidiusError(rc);
-            return 1;
         }
 
-        // convert half precision floats to full floats
-        int numResults = lenResultData / sizeof(uint16_t);
-        float* resultData32;
-        resultData32 = (float*)malloc(numResults * sizeof(*resultData32));
-        fp16tofloat(resultData32, (unsigned char*)resultData16, numResults);
+        fprintf(stderr, "movidius: GetResult failed, rc=%d\n", rc);
+        printMovidiusError(rc);
+        return 1;
+    }
 
-        for (int index = 0; index < numResults; index++)
-        {
-            results[index] = resultData32[index];
-        }
-        free(resultData32);
+    // convert half precision floats to full floats
+    int numResults = lenResultData / sizeof(uint16_t);
+    float* resultData32;
+    resultData32 = (float*)malloc(numResults * sizeof(*resultData32));
+    fp16tofloat(resultData32, (unsigned char*)resultData16, numResults);
 
-        rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_TIME_TAKEN, (void **)&timetaken, &timetakenlen);
-        if (rc)
-        {
-            fprintf(stderr, "movidius: GetGraphOption failed for getting MVNC_TIMETAKEN, rc=%d\n", rc);
-            printMovidiusError(rc);
-            return 1;
-        }
+    for (int index = 0; index < numResults; index++)
+    {
+        results[index] = resultData32[index];
+    }
+    free(resultData32);
 
-        timetakenlen = timetakenlen / sizeof(*timetaken);
-        float sum = 0;
-        for (i = 0; i < timetakenlen; i++)
-            sum += timetaken[i];
+    rc = mvncGetGraphOption(dev->currentGraphHandle, MVNC_TIME_TAKEN, (void **)&timetaken, &timetakenlen);
+    if (rc)
+    {
+        fprintf(stderr, "movidius: GetGraphOption failed for getting MVNC_TIMETAKEN, rc=%d\n", rc);
+        printMovidiusError(rc);
+        return 1;
+    }
 
-        if (sum > 100)
-            fprintf(stderr, "movidius: Inference time was long: %f ms\n", sum);
+    timetakenlen = timetakenlen / sizeof(*timetaken);
+    float sum = 0;
+    for (i = 0; i < timetakenlen; i++)
+        sum += timetaken[i];
 
-        rc = mvncGetDeviceOption(dev->dev_handle, MVNC_THERMAL_THROTTLING_LEVEL, (void **)&throttling, &throttlinglen);
-        if (rc)
-        {
-            fprintf(stderr, "movidus: GetGraphOption failed for MVNC_THERMAL_THROTTLING_LEVEL, rc=%d\n", rc);
-            printMovidiusError(rc);
-            return 1;
-        }
+    if (sum > 100)
+        fprintf(stderr, "movidius: Inference time was long: %f ms\n", sum);
 
-        if (throttling == 1)
-            fprintf(stderr, "movidius: ** NCS temperature high - thermal throttling initiated **\n");
-        else if (throttling == 2)
-        {
-            fprintf(stderr, "movidius: *********************** WARNING *************************\n");
-            fprintf(stderr, "movidius: * NCS temperature critical                              *\n");
-            fprintf(stderr, "movidius: * Aggressive thermal throttling initiated               *\n");
-            fprintf(stderr, "movidius: * Continued use may result in device damage             *\n");
-            fprintf(stderr, "movidius: *********************************************************\n");
-        }
+    rc = mvncGetDeviceOption(dev->dev_handle, MVNC_THERMAL_THROTTLING_LEVEL, (void **)&throttling, &throttlinglen);
+    if (rc)
+    {
+        fprintf(stderr, "movidus: GetGraphOption failed for MVNC_THERMAL_THROTTLING_LEVEL, rc=%d\n", rc);
+        printMovidiusError(rc);
+        return 1;
+    }
+
+    if (throttling == 1)
+        fprintf(stderr, "movidius: ** NCS temperature high - thermal throttling initiated **\n");
+    else if (throttling == 2)
+    {
+        fprintf(stderr, "movidius: *********************** WARNING *************************\n");
+        fprintf(stderr, "movidius: * NCS temperature critical                              *\n");
+        fprintf(stderr, "movidius: * Aggressive thermal throttling initiated               *\n");
+        fprintf(stderr, "movidius: * Continued use may result in device damage             *\n");
+        fprintf(stderr, "movidius: *********************************************************\n");
     }
 
     return 0;
@@ -335,9 +332,6 @@ int movidius_uploadNetwork(movidius_device* dev)
         dev->graphFileContents = NULL;
         return 1;
     }
-
-    // TODO: what is this?
-    dev->inferenceCount = 1;
 
     if (!movidius_loadGraphData(dev->networkPath, &dev->reqsize, dev->mean, dev->standard_deviation))
     {
