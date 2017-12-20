@@ -1,3 +1,3 @@
 #!/bin/sh
 
-g++ -std=c++11 movidiusdevice.cpp main.cpp -lmvnc -o minimal_movidius
+g++ -std=c++11 -g -O0 movidiusdevice.cpp main.cpp -lcrypto -lmvnc -o minimal_movidius

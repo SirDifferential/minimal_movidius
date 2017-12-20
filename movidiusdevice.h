@@ -10,10 +10,25 @@ extern "C" {
 
 #include <mvnc.h>
 
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
 enum
 {
     MOVIDIUS_OK = 0,
-    MOVIDIUS_LOADTENSOR_ERROR = 1000
+    INVALID_DEV_HANDLE = 1,
+    INVALID_INPUT_DATA = 2,
+    DATA_LOAD_FAILED = 3,
+    NOT_ALLOWED_THIS_TIME = 4,
+    MOVIDIUS_ALLOCATEGRAPH_ERROR = 1000,
+    MOVIDIUS_DEALLOCATEGRAPH_ERROR = 1001,
+    MOVIDIUS_LOADTENSOR_ERROR = 1002,
+    MOVIDIUS_NODEVICE_FOUND = 1003,
+    MOVIDIUS_OPENDEVICE_FAILED = 1004,
+    MOVIDIUS_CLOSEDEVICE_FAILED = 1005,
+    MOVIDIUS_GETRESULT_FAILED = 1006,
+    MOVIDIUS_GETGRAPHOPT_FAILED = 1007
 };
 
 typedef struct
@@ -33,8 +48,9 @@ typedef struct
 /**
   * Memset this struct to 0 before calling any of the functions for the first time
   * Start with movidius_openDevice() to get the device opened,
-  * followed by uploading networks via movidius_uploaNetwork()
+  * followed by uploading networks via movidius_uploadNetwork()
   * After this you can call movidius_runInference() to get results
+  * Before allocating a new network make sure to call movidius_deallocateGraph()
   */
 typedef struct
 {
@@ -62,6 +78,11 @@ typedef struct
     void* graphFileContents;
 
     /**
+     * Amount of bytes loaded to memory from the above graph file
+     */
+    unsigned int graphFileLen;
+
+    /**
      * Handle to a graph that's been uploaded to the movidius device
      */
     void* currentGraphHandle;
@@ -70,7 +91,7 @@ typedef struct
      * For the currently used network, the list of categories listed in categories.txt
      * The categories.txt is a caffe specific file that defines how many different classification
      * categories there are to be found in the analyzed neural network
-     * These are, for example the gender, the following: male, female, otherss
+     * These are for, for example the gender, the following: male, female, other
      */
     char** categories;
 
@@ -119,6 +140,7 @@ typedef struct
      * The resolution the currently used network expects the images to be in
      */
     unsigned int reqsize;
+
 } movidius_device;
 
 /**
@@ -170,10 +192,6 @@ extern int movidius_deallocateGraph(movidius_device* dev);
  * where the mean and standard deviation are loaded from the file mean.txt that describes the
  * mean and standard deviation values of the training set that was used to generate the caffe network
  */
-extern void movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev);
-
-#ifdef __cplusplus
-}
-#endif
+extern int movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev);
 
 #endif // MOVIDIUSDEVICE_H

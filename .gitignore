@@ -2,3 +2,4 @@ minimal_movidius
 network
 *.o
 *.swp
+otherimages

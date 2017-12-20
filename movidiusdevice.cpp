@@ -5,12 +5,28 @@
 #include <algorithm>
 #include <assert.h>
 #include <sstream>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
+#include <iomanip>
+#include <openssl/sha.h>
 #include "movidius_fp16.h"
+
+const char* AgeNetworkHash = "8c67db0340212e05de2ed2c7752df7ba42e54f6aef01b1e6547bc958491eaddf";
+const char* GenderNetworkHash = "ee7b247b0e0366aa8fc10e38261bd7cd75c9884ed8b067a5084ee07052a3c2a2";
+
+std::string sha256(char* buffer, size_t len)
+{
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha256;
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, buffer, len);
+    SHA256_Final(hash, &sha256);
+
+    std::stringstream ss;
+    for(int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+    {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+    return ss.str();
+}
 
 void printMovidiusError(int rc)
 {
@@ -32,12 +48,14 @@ void printMovidiusError(int rc)
     }
 }
 
-void movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, unsigned int color_height, movidius_device* dev)
+int movidius_convertImage(movidius_RGB* colorimage,
+    unsigned int color_width, unsigned int color_height, movidius_device* dev)
 {
     if (color_width != dev->reqsize || color_height != dev->reqsize)
     {
-        fprintf(stderr, "movidius: error, given image is wrong size: %d, %d. Expecting size: %d, %d\n", color_width, color_height, dev->reqsize, dev->reqsize);
-        return;
+        fprintf(stderr, "movidius: error, given image is wrong size: "
+                "%d, %d. Expecting size: %d, %d\n", color_width, color_height, dev->reqsize, dev->reqsize);
+        return INVALID_INPUT_DATA;
     }
 
     if (dev->currentImageSize != dev->reqsize)
@@ -67,6 +85,8 @@ void movidius_convertImage(movidius_RGB* colorimage, unsigned int color_width, u
     }
 
     floattofp16((unsigned char*)dev->movidius_image, dev->scaled_image, 3*dev->reqsize*dev->reqsize);
+
+    return 0;
 }
 
 int movidius_runInference(movidius_device* dev, float* results)
@@ -81,7 +101,7 @@ int movidius_runInference(movidius_device* dev, float* results)
         dev->reqsize * dev->reqsize * sizeof(movidius_RGB_f16), NULL);
 
     if (rc != MVNC_OK)
-    {   
+    {
         fprintf(stderr, "movidius: LoadTensor failed: %d. Image dims: "
                 "%d x %d, bytes: %d\n", rc, dev->reqsize, dev->reqsize,
                 dev->reqsize * dev->reqsize * (int)sizeof(movidius_RGB_f16));
@@ -106,13 +126,13 @@ int movidius_runInference(movidius_device* dev, float* results)
             if (rc == MVNC_OK)
             {
                 fprintf(stderr, "movidius: GetResult failed, myriad error: %s\n", debuginfo);
-                return 1;
+                return MOVIDIUS_GETRESULT_FAILED;
             }
         }
 
         fprintf(stderr, "movidius: GetResult failed, rc=%d\n", rc);
         printMovidiusError(rc);
-        return 1;
+        return MOVIDIUS_GETRESULT_FAILED;
     }
 
     // convert half precision floats to full floats
@@ -132,7 +152,7 @@ int movidius_runInference(movidius_device* dev, float* results)
     {
         fprintf(stderr, "movidius: GetGraphOption failed for getting MVNC_TIMETAKEN, rc=%d\n", rc);
         printMovidiusError(rc);
-        return 1;
+        return MOVIDIUS_GETGRAPHOPT_FAILED;
     }
 
     timetakenlen = timetakenlen / sizeof(*timetaken);
@@ -148,7 +168,7 @@ int movidius_runInference(movidius_device* dev, float* results)
     {
         fprintf(stderr, "movidus: GetGraphOption failed for MVNC_THERMAL_THROTTLING_LEVEL, rc=%d\n", rc);
         printMovidiusError(rc);
-        return 1;
+        return MOVIDIUS_GETGRAPHOPT_FAILED;
     }
 
     if (throttling == 1)
@@ -180,6 +200,13 @@ void* movidius_loadfile(const char* path, unsigned int* length)
     fseek(fp, 0, SEEK_END);
     *length = ftell(fp);
     rewind(fp);
+
+    if (*length == 0)
+    {
+        fclose(fp);
+        fprintf(stderr, "movidius: file length is 0\n");
+        return NULL;
+    }
 
     if (!(buf = (char*)malloc(*length)))
     {
@@ -249,7 +276,9 @@ int movidius_loadGraphData(const char* dir, unsigned int* reqsize, float* mean, 
 
 int movidius_loadCategories(const char* path, movidius_device* dev)
 {
-    char line[300], *p;
+    char line[1024];
+    char* p;
+
     FILE *fp = fopen(path, "r");
 
     if (!fp)
@@ -294,33 +323,32 @@ int movidius_uploadNetwork(movidius_device* dev)
     if (dev->dev_handle == NULL)
     {
         fprintf(stderr, "movidius: cannot load graph for null device\n");
-        return -1;
+        return INVALID_DEV_HANDLE;
     }
 
     if (strlen(dev->networkPath) == 0)
     {
         fprintf(stderr, "movidius: No network file path given\n");
-        return -1;
+        return INVALID_INPUT_DATA;
     }
 
     if (dev->graphFileContents != NULL || dev->currentGraphHandle != NULL || dev->numCategories > 0 || dev->categories != NULL)
     {
         fprintf(stderr, "movidius: Cannot upload a new network before calling movidius_deallocateGraph\n");
-        return 1;
+        return NOT_ALLOWED_THIS_TIME;
     }
 
     int rc, i;
     void* g = NULL;
     char path[1024];
-    unsigned len;
 
     snprintf(path, sizeof(path), "%s/graph", dev->networkPath);
-    dev->graphFileContents = movidius_loadfile(path, &len);
+    dev->graphFileContents = movidius_loadfile(path, &dev->graphFileLen);
 
     if (dev->graphFileContents == NULL)
     {
         fprintf(stderr, "movidius: %s/graph not found\n", dev->networkPath);
-        return 1;
+        return DATA_LOAD_FAILED;
     }
 
     snprintf(path, sizeof(path), "%s/categories.txt", dev->networkPath);
@@ -330,33 +358,70 @@ int movidius_uploadNetwork(movidius_device* dev)
         fprintf(stderr, "movidius: Error loading categories\n");
         free(dev->graphFileContents);
         dev->graphFileContents = NULL;
-        return 1;
+        return DATA_LOAD_FAILED;
     }
 
-    if (!movidius_loadGraphData(dev->networkPath, &dev->reqsize, dev->mean, dev->standard_deviation))
+    if (movidius_loadGraphData(dev->networkPath, &dev->reqsize, dev->mean, dev->standard_deviation) != 0)
     {
-        rc = mvncAllocateGraph(dev->dev_handle, &g, dev->graphFileContents, len);
+        fprintf(stderr, "movidius: loadGraphData failed\n");
+        return DATA_LOAD_FAILED;
+    }
 
-        if (rc != MVNC_OK)
+    rc = mvncAllocateGraph(dev->dev_handle, &g, dev->graphFileContents, dev->graphFileLen);
+
+    if (rc != MVNC_OK)
+    {
+        fprintf(stderr, "movidius: AllocateGraph failed, rc = %d for network %s, "
+                        "len: %d\n", rc, dev->networkPath, dev->graphFileLen);
+
+        printMovidiusError(rc);
+
+        fprintf(stderr, "state after allocgraph fail\n");
+        for (int cat = 0; cat < dev->numCategories; cat++)
         {
-            fprintf(stderr, "movidius: AllocateGraph failed, rc = %d for network %s\n", rc, dev->networkPath);
-            printMovidiusError(rc);
-            free(dev->graphFileContents);
-            for (i = 0; i < dev->numCategories; i++)
-                free(dev->categories[i]);
-            free(dev->categories);
-            dev->graphFileContents = NULL;
-            dev->categories = NULL;
-            dev->numCategories = 0;
+            fprintf(stderr, "category %d: %s\n", cat, dev->categories[cat]);
+        }
 
+        if (dev->graphFileContents == NULL)
+        {
+            fprintf(stderr, "Graph file is null\n");
             return 1;
         }
 
-        dev->currentGraphHandle = g;
+        std::string hashed = sha256((char*)dev->graphFileContents, dev->graphFileLen);
+        std::string expected_hash;
 
-        fprintf(stderr, "movidius: Graph allocated\n");
+        if (strcmp(dev->networkPath, "./network/Age") == 0)
+            expected_hash = AgeNetworkHash;
+        else if (strcmp(dev->networkPath, "./network/Gender") == 0)
+            expected_hash = GenderNetworkHash;
+        else
+        {
+            fprintf(stderr, "Network path is not either age or gender: %s\n", dev->networkPath);
+            return 1;
+        }
+
+        if (hashed.compare(expected_hash) != 0)
+        {
+            fprintf(stderr, "graph file sha256sum in memory differs: %s vs %s\n",
+                    hashed.c_str(), expected_hash.c_str());
+        }
+        fprintf(stderr, "graph file hash identical: %s\n", hashed.c_str());
+
+        free(dev->graphFileContents);
+        for (i = 0; i < dev->numCategories; i++)
+            free(dev->categories[i]);
+        free(dev->categories);
+        dev->graphFileContents = NULL;
+        dev->categories = NULL;
+        dev->numCategories = 0;
+
+        return MOVIDIUS_ALLOCATEGRAPH_ERROR;
     }
 
+    dev->currentGraphHandle = g;
+
+    fprintf(stderr, "movidius: Graph allocated\n");
     return 0;
 }
 
@@ -365,13 +430,13 @@ int movidius_deallocateGraph(movidius_device* dev)
     if (dev->dev_handle == NULL)
     {
         fprintf(stderr, "movidius: cannot unload graph for null device\n");
-        return -1;
+        return INVALID_DEV_HANDLE;
     }
 
     if (dev->currentGraphHandle == NULL)
     {
         fprintf(stderr, "movidius: cannot unload null graph\n");
-        return -1;
+        return INVALID_INPUT_DATA;
     }
 
     if (dev->numCategories > 0)
@@ -402,7 +467,7 @@ int movidius_deallocateGraph(movidius_device* dev)
         // I suppose we have to restart device then? Well, assign this pointer to NULL
         // as we've done all we can
         dev->currentGraphHandle = NULL;
-        return -1;
+        return MOVIDIUS_DEALLOCATEGRAPH_ERROR;
     }
 
     dev->currentGraphHandle = NULL;
@@ -416,7 +481,7 @@ int movidius_openDevice(movidius_device* dev)
     assert(sizeof(dev->dev_name) >= MVNC_MAX_NAME_SIZE);
 
     char name[MVNC_MAX_NAME_SIZE];
-    int loglevel = 2;
+    int loglevel = 1;
     void* h = NULL;
 
     mvncSetGlobalOption(MVNC_LOG_LEVEL, &loglevel, sizeof(loglevel));
@@ -426,7 +491,7 @@ int movidius_openDevice(movidius_device* dev)
     {
         fprintf(stderr, "movidius: No devices found\n");
         printMovidiusError(rc);
-        return -1;
+        return MOVIDIUS_NODEVICE_FOUND;
     }
 
     rc = mvncOpenDevice(name, &h);
@@ -434,7 +499,7 @@ int movidius_openDevice(movidius_device* dev)
     {
         fprintf(stderr, "movidius: OpenDevice %s failed, rc=%d\n", name, rc);
         printMovidiusError(rc);
-        return -1;
+        return MOVIDIUS_OPENDEVICE_FAILED;
     }
 
     fprintf(stderr, "movidius: OpenDevice %s succeeded\n", name);
@@ -449,7 +514,7 @@ int movidius_closeDevice(movidius_device* dev, bool dealloc_graph)
     if (dev->dev_handle == NULL)
     {
         fprintf(stderr, "movidius: cannot close null device\n");
-        return 1;
+        return INVALID_DEV_HANDLE;
     }
 
     if (dev->scaled_image)
@@ -470,13 +535,9 @@ int movidius_closeDevice(movidius_device* dev, bool dealloc_graph)
     {
         fprintf(stderr, "movidius: Device close failed: %d, dealloc: %d\n", rc, dealloc_graph);
         printMovidiusError(rc);
-        return 2;
+        return MOVIDIUS_CLOSEDEVICE_FAILED;
     }
 
     fprintf(stderr, "movidius: Device closed\n");
     return 0;
 }
-
-#ifdef __cplusplus
-}
-#endif
