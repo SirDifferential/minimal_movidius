@@ -4,8 +4,6 @@
 #include <string>
 #include <chrono>
 #include <unistd.h>
-#include <memory>
-#include <sstream>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -13,35 +11,20 @@
 
 const int req_width = 227;
 const int req_height = 227;
-
-struct OnDtor
-{
-    OnDtor() { dev = nullptr; }
-    OnDtor(std::shared_ptr<movidius_device> p_dev) { dev = p_dev; }
-
-    ~OnDtor()
-    {
-        if (dev != nullptr)
-        {
-            movidius_closeDevice(dev.get(), false);
-            dev.reset();
-        }
-    }
-
-    std::shared_ptr<movidius_device> dev;
-};
+const bool show_perfs = false;
+const bool show_results = false;
 
 int runNetwork(const std::vector<std::string>& fnames,
                const std::vector<unsigned char*>& images,
-               movidius_device& movidius_dev,
+               movidius_device* movidius_dev,
                const std::string& networkPath)
 {
     std::chrono::high_resolution_clock::time_point t1;
     std::chrono::high_resolution_clock::time_point t2;
     std::chrono::high_resolution_clock::time_point t3;
 
-    strcpy(movidius_dev.networkPath,  networkPath.c_str());
-    int ret = movidius_uploadNetwork(&movidius_dev);
+    strcpy(movidius_dev->networkPath,  networkPath.c_str());
+    int ret = movidius_uploadNetwork(movidius_dev);
 
     if (ret != 0)
     {
@@ -50,19 +33,19 @@ int runNetwork(const std::vector<std::string>& fnames,
     }
 
     float* results = NULL;
-    if (&movidius_dev.numCategories == 0)
+    if (movidius_dev->numCategories == 0)
     {
         fprintf(stderr, "no categories after loading network\n");
         return 1;
     }
 
-    results = new float[movidius_dev.numCategories];
-    memset(results, 0, sizeof(float) * movidius_dev.numCategories);
+    results = new float[movidius_dev->numCategories];
+    memset(results, 0, sizeof(float) * movidius_dev->numCategories);
 
     for (int c = 0; c < fnames.size(); c++)
     {
         t1 = std::chrono::high_resolution_clock::now();
-        if (movidius_convertImage((movidius_RGB*)images.at(c), req_width, req_height, &movidius_dev) != 0)
+        if (movidius_convertImage((movidius_RGB*)images.at(c), req_width,req_height, movidius_dev) != 0)
         {
             fprintf(stderr, "failed converting image to 16bit float format\n");
             return 1;
@@ -70,7 +53,7 @@ int runNetwork(const std::vector<std::string>& fnames,
 
         t2 = std::chrono::high_resolution_clock::now();
 
-        int ret = movidius_runInference(&movidius_dev, results);
+        int ret = movidius_runInference(movidius_dev, results);
 
         t3 = std::chrono::high_resolution_clock::now();
 
@@ -83,16 +66,22 @@ int runNetwork(const std::vector<std::string>& fnames,
         auto dur1 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
         auto dur2 = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
 
-        fprintf(stderr, "convertImage(): %d us\n", dur1);
-        fprintf(stderr, "runInference(): %d us\n", dur2);
-
-        for (int cat = 0; cat < movidius_dev.numCategories; cat++)
+        if (show_perfs)
         {
-            fprintf(stderr, "category %d (%s): %f\n", cat, movidius_dev.categories[cat], results[cat]);
+            fprintf(stderr, "convertImage(): %d us\n", dur1);
+            fprintf(stderr, "runInference(): %d us\n", dur2);
+        }
+
+        if (show_results)
+        {
+            for (int cat = 0; cat < movidius_dev->numCategories; cat++)
+            {
+                fprintf(stderr, "category %d (%s): %f\n", cat, movidius_dev->categories[cat], results[cat]);
+            }
         }
     }
 
-    ret = movidius_deallocateGraph(&movidius_dev);
+    ret = movidius_deallocateGraph(movidius_dev);
     if (ret != 0)
     {
         fprintf(stderr, "Failed deallocating graph: %d\n", ret);
@@ -106,13 +95,11 @@ int runNetwork(const std::vector<std::string>& fnames,
 
 int main(int argc, char** argv)
 {
-    std::shared_ptr<movidius_device> movidius_dev = std::shared_ptr<movidius_device>(new movidius_device());
-    memset(movidius_dev.get(), 0, sizeof(movidius_device));
+    movidius_device movidius_dev;
+    memset(&movidius_dev, 0, sizeof(movidius_device));
 
-    if (movidius_openDevice(movidius_dev.get()) != 0)
+    if (movidius_openDevice(&movidius_dev) != 0)
         return 1;
-
-    OnDtor closeOnExit(movidius_dev);
 
     std::vector<unsigned char*> images;
     std::vector<std::string> fnames;
@@ -126,9 +113,12 @@ int main(int argc, char** argv)
     fnames.push_back("./sample_1505732949297.png");
     fnames.push_back("./sample_1505732952353.png");
 
+    // load images from disk
     for (int c = 0; c < fnames.size(); c++)
     {
-        int width, height, cp = 0;
+        int width, height, cp;
+        width = height = cp = 0;
+
         unsigned char* img = stbi_load(fnames.at(c).c_str(), &width, &height, &cp, 3); 
         if (img == NULL)
         {
@@ -138,44 +128,73 @@ int main(int argc, char** argv)
 
         if (width != req_width || height != req_height)
         {
-            fprintf(stderr, "Invalid size for image %s. Expected %d x %d, got %d x %d\n", fnames.at(c).c_str(), width, height, req_width, req_height);
+            fprintf(stderr, "Invalid size for image %s. Expected %d x %d, got %d x %d\n",
+                    fnames.at(c).c_str(), width, height, req_width, req_height);
             return 1;
         }
 
         images.push_back(img);
     }
 
-    int ret = runNetwork(fnames, images, *movidius_dev.get(), "./network/Age");
-    if (ret != 0)
-    {
-        fprintf(stderr, "Age network failed: %d\n", ret);
-        return 1;
-    }
+    int loops = 0;
+    int loops_total = 4;
+    int ret = 0;
 
-    ret = runNetwork(fnames, images, *movidius_dev.get(), "./network/Gender");
-    if (ret != 0)
+    // run networks a few times
+    while (loops < loops_total)
     {
-        fprintf(stderr, "Gender network failed: %d\n", ret);
-        return 1;
-    }
+        loops++;
 
-    ret = runNetwork(fnames, images, *movidius_dev.get(), "./network/Age");
-    if (ret != 0)
-    {
-        fprintf(stderr, "Age network failed: %d\n", ret);
-        return 1;
-    }
+        ret = runNetwork(fnames, images, &movidius_dev, "./network/Age");
+        if (ret != 0)
+        {
+            fprintf(stderr, "Age network failed: %d\n", ret);
+            break;
+        }
 
-    ret = runNetwork(fnames, images, *movidius_dev.get(), "./network/Gender");
-    if (ret != 0)
-    {
-        fprintf(stderr, "Gender network failed: %d\n", ret);
-        return 1;
+        ret = runNetwork(fnames, images, &movidius_dev, "./network/Gender");
+        if (ret != 0)
+        {
+            fprintf(stderr, "Gender network failed: %d\n", ret);
+            break;
+        }
+
+        ret = runNetwork(fnames, images, &movidius_dev, "./network/Age");
+        if (ret != 0)
+        {
+            fprintf(stderr, "Age network failed: %d\n", ret);
+            break;
+        }
+
+        ret = runNetwork(fnames, images, &movidius_dev, "./network/Gender");
+        if (ret != 0)
+        {
+            fprintf(stderr, "Gender network failed: %d\n", ret);
+            break;
+        }
+
+        ret = runNetwork(fnames, images, &movidius_dev, "./network/Age");
+        if (ret != 0)
+        {
+            fprintf(stderr, "Age network failed: %d\n", ret);
+            break;
+        }
+
+        ret = runNetwork(fnames, images, &movidius_dev, "./network/Gender");
+        if (ret != 0)
+        {
+            fprintf(stderr, "Gender network failed: %d\n", ret);
+            break;
+        }
+
+        fprintf(stderr, "Done with loop %d / %d\n", loops, loops_total);
     }
 
     for (int c = 0; c < images.size(); c++)
         free(images.at(c));
     images.clear();
 
-    return 0;
+    movidius_closeDevice(&movidius_dev, false);
+
+    return ret;
 }

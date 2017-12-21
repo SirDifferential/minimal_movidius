@@ -12,6 +12,9 @@
 const char* AgeNetworkHash = "8c67db0340212e05de2ed2c7752df7ba42e54f6aef01b1e6547bc958491eaddf";
 const char* GenderNetworkHash = "ee7b247b0e0366aa8fc10e38261bd7cd75c9884ed8b067a5084ee07052a3c2a2";
 
+/**
+ * This function is here to validate graph data is loaded into memory correctly
+ */
 std::string sha256(char* buffer, size_t len)
 {
     unsigned char hash[SHA256_DIGEST_LENGTH];
@@ -229,8 +232,14 @@ void* movidius_loadfile(const char* path, unsigned int* length)
 
 int movidius_loadGraphData(const char* dir, unsigned int* reqsize, float* mean, float* std)
 {
-    char path[300];
+    char path[1024];
     int i;
+
+    if (strlen(dir) > 1000)
+    {
+        fprintf(stderr, "Given dir path is too long: %s\n", dir);
+        return -1;
+    }
 
     snprintf(path, sizeof(path), "%s/stat.txt", dir);
     FILE *fp = fopen(path, "r");
